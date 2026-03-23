@@ -775,15 +775,44 @@ class TradeMapLiteActionViewer:
             ib_broker.execute(action, symbol, step, side_upper)
 
     def log_action(self, step, orders):
+        """Log both call and put side actions for every step, matching original format:
+        step-XXXX_close-X.XX_callAction-{action}_callSymbol-{sym}_putAction-{action}_putSymbol-{sym}
+        """
         close_str = f"{self.current_close:.2f}" if hasattr(self, 'current_close') else "0.00"
+
+        # Build per-side action from the order list
+        call_action = 'NA'
+        call_symbol = 'NA'
+        put_action = 'NA'
+        put_symbol = 'NA'
+
         for order in orders:
-            action = order['action']
-            side_str = (order['side'] or 'NA').upper()
-            symbol = order['symbol']
-            line = f"step-{step:04d}_close-{close_str}_action-{action}_side-{side_str}_symbol-{symbol}"
-            _logger.info(f"[ACTION] {line}")
-            if action in ('Buy', 'Sell'):
-                _logger.info(f"[ACTION] Trade #{self.trade_num} | PNL: {self.total_pnl:+.4f}")
+            act = order['action']
+            side = order.get('side')
+            sym = order.get('symbol', 'NA')
+            if side == 'call':
+                call_action = act
+                call_symbol = sym if sym else 'NA'
+            elif side == 'put':
+                put_action = act
+                put_symbol = sym if sym else 'NA'
+            elif act == 'HoldCurrent' or act == 'NA':
+                # No flip — attribute to current position side
+                if self.position_side == 'call':
+                    call_action = act
+                    call_symbol = self.position_symbol or 'NA'
+                elif self.position_side == 'put':
+                    put_action = act
+                    put_symbol = self.position_symbol or 'NA'
+
+        line = (f"step-{step:04d}_close-{close_str}"
+                f"_callAction-{call_action}_callSymbol-{call_symbol}"
+                f"_putAction-{put_action}_putSymbol-{put_symbol}")
+        _logger.info(f"[ACTION] {line}")
+
+        has_trade = any(o['action'] in ('Buy', 'Sell') for o in orders)
+        if has_trade:
+            _logger.info(f"[ACTION] Trade #{self.trade_num} | PNL: {self.total_pnl:+.4f}")
 
     # =========================================================================
     # Live mode
