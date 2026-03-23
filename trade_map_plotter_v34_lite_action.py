@@ -376,34 +376,9 @@ class TradeMapLiteActionViewer:
         ttk.Spinbox(live_frame, from_=1, to=10000, increment=1,
                     textvariable=self.qty_var, width=5).pack(side=tk.LEFT, padx=2)
 
-        # Signal + Trade table
+        # Trades table
         table_frame = ttk.Frame(self.root)
         table_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=5, pady=5)
-
-        # Signal history table
-        sig_header = ttk.Frame(table_frame)
-        sig_header.pack(fill=tk.X)
-        self.sig_header_label = ttk.Label(sig_header, text="Signals", font=('Arial', 10, 'bold'))
-        self.sig_header_label.pack(side=tk.LEFT)
-
-        sig_table_frame = ttk.Frame(table_frame)
-        sig_table_frame.pack(fill=tk.BOTH, expand=True, pady=5)
-
-        self.sig_cols = ('Step', 'Close', 'WMA55', 'Signal', 'Pattern', 'Action', 'Side', 'PNL', 'TotalPNL')
-        self.sig_tree = ttk.Treeview(sig_table_frame, columns=self.sig_cols, show='headings', height=8)
-        sig_widths = {'Step': 60, 'Close': 80, 'WMA55': 80, 'Signal': 60,
-                      'Pattern': 60, 'Action': 80, 'Side': 50, 'PNL': 70, 'TotalPNL': 80}
-        for col in self.sig_cols:
-            self.sig_tree.heading(col, text=col)
-            self.sig_tree.column(col, width=sig_widths.get(col, 60), anchor='center')
-        sig_scroll = ttk.Scrollbar(sig_table_frame, orient=tk.VERTICAL, command=self.sig_tree.yview)
-        self.sig_tree.configure(yscrollcommand=sig_scroll.set)
-        self.sig_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        sig_scroll.pack(side=tk.RIGHT, fill=tk.Y)
-
-        ttk.Separator(table_frame, orient='horizontal').pack(fill='x', pady=5)
-
-        # Trades table
         trade_header = ttk.Frame(table_frame)
         trade_header.pack(fill=tk.X)
         self.trade_header_label = ttk.Label(trade_header, text="Trades", font=('Arial', 10, 'bold'))
@@ -423,7 +398,7 @@ class TradeMapLiteActionViewer:
             'SL.04', 'SL.04nStp', 'SL.04nCls', 'SL.04nRdg', 'SL.04xPNL',
             'SL.05', 'SL.05nStp', 'SL.05nCls', 'SL.05nRdg', 'SL.05xPNL',
         )
-        self.trade_tree = ttk.Treeview(trade_table_frame, columns=self.trade_cols, show='headings', height=8)
+        self.trade_tree = ttk.Treeview(trade_table_frame, columns=self.trade_cols, show='headings', height=20)
         trade_widths = {
             '#': 30, 'Side': 40, 'EntryStep': 65, 'EntryClose': 75, 'EntryWMA': 75,
             'ExitStep': 65, 'ExitClose': 75, 'ExitWMA': 75, 'ExitReason': 75,
@@ -887,48 +862,7 @@ class TradeMapLiteActionViewer:
         return orders
 
     def _update_signal_table(self):
-        """Refresh the signal treeview from self.signals."""
-        for item in self.sig_tree.get_children():
-            self.sig_tree.delete(item)
-
-        for sig in self.signals:
-            wma_str = f"{sig['wma55']:.4f}" if sig['wma55'] is not None else "---"
-            sig_str = sig['signal'] or "---"
-            pat_str = sig['pattern'] or "---"
-            act_str = sig['action'] or "NA"
-            side_str = (sig['side'] or "---").upper() if sig['side'] else "---"
-            pnl_str = f"{sig['pnl']:+.4f}" if sig['pnl'] is not None else ""
-            tpnl_str = f"{sig['total_pnl']:+.4f}" if sig['total_pnl'] is not None else ""
-
-            tag = ''
-            if act_str == 'Buy':
-                tag = 'buy'
-            elif act_str == 'Sell':
-                tag = 'sell'
-
-            self.sig_tree.insert('', 'end', values=(
-                sig['step'], f"{sig['close']:.4f}", wma_str,
-                sig_str, pat_str, act_str, side_str, pnl_str, tpnl_str,
-            ), tags=(tag,))
-
-        self.sig_tree.tag_configure('buy', foreground='#008800')
-        self.sig_tree.tag_configure('sell', foreground='#CC0000')
-
-        # Auto-scroll to bottom
-        children = self.sig_tree.get_children()
-        if children:
-            self.sig_tree.see(children[-1])
-
-        # Update header
-        buy_count = sum(1 for s in self.signals if s['action'] == 'Buy')
-        sell_count = sum(1 for s in self.signals if s['action'] == 'Sell')
-        pos_str = f"{self.position_side.upper()} @ {self.position_symbol}" if self.position else "FLAT"
-        self.sig_header_label.config(
-            text=f"Signals - {len(self.signals)} steps | {buy_count} buys, {sell_count} sells | "
-                 f"PNL: {self.total_pnl:+.4f} | Position: {pos_str}"
-        )
-
-        # Update trades table
+        """Update the trades table (signals are log-only now)."""
         self._update_trade_table()
 
     def _update_trade_table(self):
