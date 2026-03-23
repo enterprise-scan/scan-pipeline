@@ -67,19 +67,24 @@ format_prefix = _pipeline_module.format_prefix
 compute_volume_bars = _pipeline_module.compute_volume_bars
 
 
-def get_market_open_ts(date_str):
+PAPER_DELAY_MIN = 15  # IB paper account data delay
+
+def get_market_open_ts(date_str, paper=False):
     h, m = _market_open_utc(date_str)
     date = datetime.strptime(date_str, '%Y-%m-%d')
     market_open = datetime(date.year, date.month, date.day, h, m, 0,
                           tzinfo=timezone.utc)
-    return int(market_open.timestamp() * 1000)
+    ts = int(market_open.timestamp() * 1000)
+    if paper:
+        ts += PAPER_DELAY_MIN * 60 * 1000
+    return ts
 
 
 def get_step_timestamp(market_open_ts, step):
     return market_open_ts + (step - 1) * STEP_SIZE * 1000
 
 
-def run(date_str, port, max_step=None, volumes=None, use_bars5s=False, skip_step_files=False, core_only=False):
+def run(date_str, port, max_step=None, volumes=None, use_bars5s=False, skip_step_files=False, core_only=False, paper=False):
     if volumes is None:
         volumes = VOLUMES
 
@@ -95,7 +100,7 @@ def run(date_str, port, max_step=None, volumes=None, use_bars5s=False, skip_step
     bar_dir = os.path.join(run_dir, 'bar')
     os.makedirs(bar_dir, exist_ok=True)
 
-    market_open_ts = get_market_open_ts(date_str)
+    market_open_ts = get_market_open_ts(date_str, paper=paper)
     market_open_dt = datetime.fromtimestamp(market_open_ts / 1000, tz=timezone.utc)
     step_limit = max_step if max_step else MAX_STEPS
 
@@ -291,7 +296,7 @@ def main():
     set_ticker(args.symbol)
 
     run(date_str, port, args.max_step, volumes, use_bars5s=args.bars5s,
-        skip_step_files=args.no_step_files, core_only=args.core_only)
+        skip_step_files=args.no_step_files, core_only=args.core_only, paper=args.paper)
 
 
 if __name__ == '__main__':
