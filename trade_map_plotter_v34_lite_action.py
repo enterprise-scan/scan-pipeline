@@ -973,8 +973,9 @@ class TradeMapLiteActionViewer:
         closed = [t for t in self.trades if t.get("exit_reason") != "open"]
         w = sum(1 for t in closed if t.get("pnl", 0) > 0)
         l = sum(1 for t in closed if t.get("pnl", 0) < 0)
+        dpnl_sum = sum(t.get("d_pnl", 0) or 0 for t in closed)
         self.trade_header_label.config(
-            text=f"Trades - {len(all_trades)} total ({len(closed)} closed: W={w} L={l}) | PNL: {self.total_pnl:+.4f}"
+            text=f"Trades - {len(all_trades)} total ({len(closed)} closed: W={w} L={l}) | PNL: {self.total_pnl:+.4f} | dPNL: {dpnl_sum:+.4f}"
         )
 
     def _fire_ib_order(self, order, step):
