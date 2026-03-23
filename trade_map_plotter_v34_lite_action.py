@@ -43,6 +43,7 @@ import scan
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 MAX_STEPS = 4680
+EOD_STEP = 4600  # close all positions at this step, no new trades after
 MIN_FIRST_BAR = 13
 
 
@@ -738,6 +739,29 @@ class TradeMapLiteActionViewer:
         wma_val = self._cached_wma[row_idx]
         wma_clean = wma_val if not np.isnan(wma_val) else None
         self.current_close = close_val
+
+        # EOD: close open trade, no new trades
+        if self.current_step >= EOD_STEP:
+            orders = []
+            if self.current_trade is not None:
+                self._close_trade(self.current_trade, self.current_step, close_val, wma_clean, "eod")
+                orders.append({'action': 'Sell', 'side': self.position_side, 'symbol': self.position_symbol})
+                self.signals.append({
+                    'step': self.current_step, 'close': close_val, 'wma55': wma_clean,
+                    'signal': None, 'pattern': None,
+                    'action': 'Sell', 'side': self.position_side,
+                    'pnl': self.trades[-1]["pnl"], 'total_pnl': round(self.total_pnl, 4),
+                })
+                _logger.info(f"[EOD] Step {self.current_step} >= {EOD_STEP} — closed {self.position_side} trade, PNL: {self.trades[-1]['pnl']:+.4f}")
+                self.current_trade = None
+                self.position = None
+                self.position_side = None
+                self.position_symbol = None
+                self.entry_close = None
+                self.entry_wma = None
+            if not orders:
+                orders.append({'action': 'NA', 'side': None, 'symbol': 'NA'})
+            return orders
 
         reading = self._detect_at_step(row_idx)
 
