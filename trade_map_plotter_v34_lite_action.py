@@ -377,6 +377,10 @@ class TradeMapLiteActionViewer:
         ttk.Spinbox(live_frame, from_=1, to=10000, increment=1,
                     textvariable=self.qty_var, width=5).pack(side=tk.LEFT, padx=2)
 
+        ttk.Separator(live_frame, orient='vertical').pack(side=tk.LEFT, fill='y', padx=10)
+        self.batch_catchup_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(live_frame, text="Batch Catchup", variable=self.batch_catchup_var).pack(side=tk.LEFT, padx=2)
+
         # Trades table
         table_frame = ttk.Frame(self.root)
         table_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=5, pady=5)
@@ -1064,29 +1068,11 @@ class TradeMapLiteActionViewer:
             self.live_status.config(text="LIVE MODE")
             _logger.info(f"[LIVE] Starting. run_dir={self.run_dir}, max_step={self.max_available_step}")
 
-            # Phase 1: Catch up through all existing steps
-            for step in range(1, self.max_available_step + 1):
-                if not self.live_running:
-                    break
-
-                csv_path = get_step_file(self.run_dir, step)
-                if not os.path.exists(csv_path):
-                    continue
-
-                self.current_step = step
-                # Force aggregate reload on each step during catchup
-                self._cached_agg_mtime = 0
-
-                orders = self.compute_actions()
-                self.log_action(step, orders)
-
-                if step % 100 == 0:
-                    _logger.info(f"[CATCHUP] Step {step}/{self.max_available_step}")
-                    self.live_status.config(text=f"Catching up: {step}/{self.max_available_step}")
-                    last = orders[-1]
-                    self.action_label.config(text=f"{last['action']} {(last['side'] or '').upper()} {last['symbol']}")
-                    self._update_signal_table()
-                    self.root.update()
+            # Phase 1: Catch up
+            if self.batch_catchup_var.get():
+                self._batch_catchup()
+            else:
+                self._sequential_catchup()
 
             if not self.live_running:
                 _logger.info(f"[LIVE] Stopped during catch-up")
@@ -1107,6 +1093,205 @@ class TradeMapLiteActionViewer:
             _logger.error(f"[LIVE] CRASH in go_live: {e}")
             _logger.error(traceback.format_exc())
             self._live_cleanup()
+
+    def _sequential_catchup(self):
+        """Original step-by-step catch-up (slow but simple)."""
+        for step in range(1, self.max_available_step + 1):
+            if not self.live_running:
+                break
+            csv_path = get_step_file(self.run_dir, step)
+            if not os.path.exists(csv_path):
+                continue
+            self.current_step = step
+            self._cached_agg_mtime = 0
+            orders = self.compute_actions()
+            self.log_action(step, orders)
+            if step % 100 == 0:
+                _logger.info(f"[CATCHUP] Step {step}/{self.max_available_step}")
+                self.live_status.config(text=f"Catching up: {step}/{self.max_available_step}")
+                self.root.update()
+
+    def _batch_catchup(self):
+        """Fast parallel catch-up: batch detect signals, then replay into trade state."""
+        from multiprocessing import Pool, cpu_count
+
+        self.live_status.config(text="Batch catch-up: loading aggregate...")
+        self.root.update()
+
+        # Load aggregate once
+        if not self._load_aggregate():
+            _logger.error("[BATCH] No aggregate CSV found")
+            return
+
+        df = self._cached_df
+        if 'step' not in df.columns:
+            _logger.error("[BATCH] No step column")
+            return
+
+        wma = self._cached_wma
+        close_vals = self._cached_close_values
+        total_len = len(wma)
+
+        # Build work items for parallel detection
+        steps = df['step'].values
+        work = []
+        for i in range(len(steps)):
+            if np.isnan(wma[i]):
+                continue
+            if int(steps[i]) > self.max_available_step:
+                break
+            wma_slice = wma[:i + 1].copy()
+            work.append((i, int(steps[i]), float(close_vals[i]), float(wma[i]), wma_slice, total_len))
+
+        _logger.info(f"[BATCH] {len(work)} steps to detect across {cpu_count()} cores")
+        self.live_status.config(text=f"Batch catch-up: detecting {len(work)} steps...")
+        self.root.update()
+
+        # Parallel detection
+        num_workers = max(1, cpu_count() - 1)
+        results = {}
+
+        # Add None-reading rows for steps with no WMA
+        for i in range(len(steps)):
+            s = int(steps[i])
+            if s > self.max_available_step:
+                break
+            if np.isnan(wma[i]):
+                results[s] = {"step": s, "close": float(close_vals[i]), "wma55": None, "reading": None}
+
+        with Pool(num_workers) as pool:
+            for i, result in enumerate(pool.imap(scan.process_step, work, chunksize=10)):
+                results[result["step"]] = result
+                if (i + 1) % 200 == 0:
+                    self.live_status.config(text=f"Batch detect: {i + 1}/{len(work)} steps...")
+                    self.root.update()
+
+        _logger.info(f"[BATCH] Detection done. Replaying {len(results)} signals into trade state...")
+        self.live_status.config(text="Batch catch-up: replaying trades...")
+        self.root.update()
+
+        # Get expiration for symbol building
+        current_date_str = self.date_var.get()
+        clean_date = current_date_str.split(' ')[0] if ' (' in current_date_str else current_date_str
+        exp_str = self.exp_var.get()
+        if exp_str:
+            expiration_dt = datetime.strptime(exp_str, '%Y-%m-%d')
+        else:
+            expiration_dt = get_next_expiration(clean_date)
+        ticker = self.ticker_var.get().strip().upper()
+
+        def _build_symbol(side, close_val):
+            if self.mode_var.get() == 'stock':
+                return ticker
+            if side == "call":
+                strike = (close_val // 2.5) * 2.5
+                return build_option_symbol(strike, 'C', expiration_dt)
+            else:
+                strike = math.ceil(close_val / 2.5) * 2.5
+                return build_option_symbol(strike, 'P', expiration_dt)
+
+        # Sequential replay of signals into trade state machine
+        for step_num in sorted(results.keys()):
+            if not self.live_running:
+                break
+            r = results[step_num]
+            self.current_step = step_num
+            self.current_close = r["close"]
+            reading = r["reading"]
+            wma_clean = r["wma55"]
+
+            # Update open trade min/max
+            if self.current_trade is not None:
+                self._update_trade_minmax(self.current_trade, r["close"], step_num)
+                self.current_trade["hold_steps"] += 1
+
+            # EOD check
+            if step_num >= EOD_STEP:
+                if self.current_trade is not None:
+                    self._close_trade(self.current_trade, step_num, r["close"], wma_clean, "eod")
+                    self.signals.append({
+                        'step': step_num, 'close': r["close"], 'wma55': wma_clean,
+                        'signal': None, 'pattern': None,
+                        'action': 'Sell', 'side': self.position_side,
+                        'pnl': self.trades[-1]["pnl"], 'total_pnl': round(self.total_pnl, 4),
+                    })
+                    self.current_trade = None
+                    self.position = None
+                    self.position_side = None
+                    self.position_symbol = None
+                continue
+
+            if reading is None:
+                self.signals.append({
+                    'step': step_num, 'close': r["close"], 'wma55': wma_clean,
+                    'signal': None, 'pattern': None,
+                    'action': 'HoldCurrent' if self.position else 'NA',
+                    'side': self.position_side, 'pnl': None,
+                    'total_pnl': round(self.total_pnl, 4),
+                })
+                continue
+
+            self.reading_history.append(reading)
+            pattern = scan.check_pattern(self.reading_history, self.first_trade)
+
+            if self.position is None:
+                if pattern is not None:
+                    if self.first_trade:
+                        self.first_trade = False
+                    self.trade_num += 1
+                    self.position = pattern
+                    self.position_side = pattern
+                    self.entry_close = r["close"]
+                    self.entry_wma = wma_clean
+                    symbol = _build_symbol(pattern, r["close"])
+                    self.position_symbol = symbol
+                    self.current_trade = self._open_trade(pattern, step_num, r["close"], wma_clean)
+                    self.signals.append({
+                        'step': step_num, 'close': r["close"], 'wma55': wma_clean,
+                        'signal': reading, 'pattern': pattern,
+                        'action': 'Buy', 'side': pattern, 'pnl': None,
+                        'total_pnl': round(self.total_pnl, 4),
+                    })
+                else:
+                    self.signals.append({
+                        'step': step_num, 'close': r["close"], 'wma55': wma_clean,
+                        'signal': reading, 'pattern': None,
+                        'action': 'NA', 'side': None, 'pnl': None,
+                        'total_pnl': round(self.total_pnl, 4),
+                    })
+            elif pattern is not None and pattern != self.position:
+                # Flip
+                old_side = self.position_side
+                self._close_trade(self.current_trade, step_num, r["close"], wma_clean, "signal_flip")
+                self.signals.append({
+                    'step': step_num, 'close': r["close"], 'wma55': wma_clean,
+                    'signal': reading, 'pattern': pattern,
+                    'action': 'Sell', 'side': old_side, 'pnl': self.trades[-1]["pnl"],
+                    'total_pnl': round(self.total_pnl, 4),
+                })
+                self.trade_num += 1
+                self.position = pattern
+                self.position_side = pattern
+                self.entry_close = r["close"]
+                self.entry_wma = wma_clean
+                new_symbol = _build_symbol(pattern, r["close"])
+                self.position_symbol = new_symbol
+                self.current_trade = self._open_trade(pattern, step_num, r["close"], wma_clean)
+                self.signals.append({
+                    'step': step_num, 'close': r["close"], 'wma55': wma_clean,
+                    'signal': reading, 'pattern': pattern,
+                    'action': 'Buy', 'side': pattern, 'pnl': None,
+                    'total_pnl': round(self.total_pnl, 4),
+                })
+            else:
+                self.signals.append({
+                    'step': step_num, 'close': r["close"], 'wma55': wma_clean,
+                    'signal': reading, 'pattern': pattern,
+                    'action': 'HoldCurrent', 'side': self.position_side, 'pnl': None,
+                    'total_pnl': round(self.total_pnl, 4),
+                })
+
+        _logger.info(f"[BATCH] Replay done. {len(self.trades)} trades, PNL: {self.total_pnl:+.4f}")
 
     def poll_for_new_steps(self):
         if not self.live_running:
