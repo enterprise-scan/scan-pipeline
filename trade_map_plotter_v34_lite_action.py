@@ -239,10 +239,13 @@ class TradeMapLiteActionViewer:
         self.position_symbol = None
         self.position_side = None  # "call" or "put"
         self.entry_close = None
+        self.entry_wma = None
         self.trade_num = 0
         self.first_trade = True
         self.total_pnl = 0.0
         self.signals = []  # list of dicts for table display
+        self.trades = []   # list of trade dicts (matches scan.py trade format)
+        self.current_trade = None  # open trade being tracked
         self.current_close = 0.0
 
         # Cached WMA state
@@ -387,16 +390,48 @@ class TradeMapLiteActionViewer:
         sig_table_frame.pack(fill=tk.BOTH, expand=True, pady=5)
 
         self.sig_cols = ('Step', 'Close', 'WMA55', 'Signal', 'Pattern', 'Action', 'Side', 'PNL', 'TotalPNL')
-        self.sig_tree = ttk.Treeview(sig_table_frame, columns=self.sig_cols, show='headings', height=20)
-        col_widths = {'Step': 60, 'Close': 80, 'WMA55': 80, 'Signal': 60,
+        self.sig_tree = ttk.Treeview(sig_table_frame, columns=self.sig_cols, show='headings', height=8)
+        sig_widths = {'Step': 60, 'Close': 80, 'WMA55': 80, 'Signal': 60,
                       'Pattern': 60, 'Action': 80, 'Side': 50, 'PNL': 70, 'TotalPNL': 80}
         for col in self.sig_cols:
             self.sig_tree.heading(col, text=col)
-            self.sig_tree.column(col, width=col_widths.get(col, 60), anchor='center')
+            self.sig_tree.column(col, width=sig_widths.get(col, 60), anchor='center')
         sig_scroll = ttk.Scrollbar(sig_table_frame, orient=tk.VERTICAL, command=self.sig_tree.yview)
         self.sig_tree.configure(yscrollcommand=sig_scroll.set)
         self.sig_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         sig_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+
+        ttk.Separator(table_frame, orient='horizontal').pack(fill='x', pady=5)
+
+        # Trades table
+        trade_header = ttk.Frame(table_frame)
+        trade_header.pack(fill=tk.X)
+        self.trade_header_label = ttk.Label(trade_header, text="Trades", font=('Arial', 10, 'bold'))
+        self.trade_header_label.pack(side=tk.LEFT)
+
+        trade_table_frame = ttk.Frame(table_frame)
+        trade_table_frame.pack(fill=tk.BOTH, expand=True, pady=5)
+
+        self.trade_cols = (
+            '#', 'Side', 'EntryStep', 'EntryClose', 'EntryWMA',
+            'ExitStep', 'ExitClose', 'ExitWMA', 'ExitReason',
+            'Hold', 'MinPNL', 'MaxPNL', 'PNL', 'TotalPNL',
+            'SL0.01', 'SL0.02', 'SL0.03', 'SL0.04', 'SL0.05',
+        )
+        self.trade_tree = ttk.Treeview(trade_table_frame, columns=self.trade_cols, show='headings', height=8)
+        trade_widths = {
+            '#': 30, 'Side': 40, 'EntryStep': 65, 'EntryClose': 75, 'EntryWMA': 75,
+            'ExitStep': 65, 'ExitClose': 75, 'ExitWMA': 75, 'ExitReason': 75,
+            'Hold': 40, 'MinPNL': 60, 'MaxPNL': 60, 'PNL': 60, 'TotalPNL': 70,
+            'SL0.01': 55, 'SL0.02': 55, 'SL0.03': 55, 'SL0.04': 55, 'SL0.05': 55,
+        }
+        for col in self.trade_cols:
+            self.trade_tree.heading(col, text=col)
+            self.trade_tree.column(col, width=trade_widths.get(col, 55), anchor='center')
+        trade_scroll = ttk.Scrollbar(trade_table_frame, orient=tk.VERTICAL, command=self.trade_tree.yview)
+        self.trade_tree.configure(yscrollcommand=trade_scroll.set)
+        self.trade_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        trade_scroll.pack(side=tk.RIGHT, fill=tk.Y)
 
         # Key bindings
         self.root.bind('<Left>', lambda e: self.navigate(-1))
@@ -470,10 +505,13 @@ class TradeMapLiteActionViewer:
         self.position_symbol = None
         self.position_side = None
         self.entry_close = None
+        self.entry_wma = None
         self.trade_num = 0
         self.first_trade = True
         self.total_pnl = 0.0
         self.signals = []
+        self.trades = []
+        self.current_trade = None
         self.prev_action = 'NA'
         self.prev_symbol = 'NA'
 
@@ -572,6 +610,52 @@ class TradeMapLiteActionViewer:
     # Action computation - scan.py pattern-based
     # =========================================================================
 
+    def _open_trade(self, side, step, close, wma):
+        """Create a new trade dict matching scan.py format."""
+        t = {
+            "trade": self.trade_num, "side": side,
+            "entry_step": step, "entry_close": close, "entry_wma55": wma,
+            "exit_step": None, "exit_close": None, "exit_wma55": None,
+            "exit_reason": None, "hold_steps": 0,
+            "min_pnl": 0.0, "max_pnl": 0.0,
+            "pnl": None, "total_pnl": None,
+        }
+        for sl in scan.SL_LEVELS:
+            t[f"sl{sl}_step"] = None
+        return t
+
+    def _update_trade_minmax(self, trade, close, step):
+        """Update min/max PNL and SL level triggers on open trade."""
+        if trade["side"] == "call":
+            unrealized = close - trade["entry_close"]
+        else:
+            unrealized = trade["entry_close"] - close
+        unrealized = round(unrealized, 4)
+        if unrealized < trade["min_pnl"]:
+            trade["min_pnl"] = unrealized
+        if unrealized > trade["max_pnl"]:
+            trade["max_pnl"] = unrealized
+        for sl in scan.SL_LEVELS:
+            if trade[f"sl{sl}_step"] is None and unrealized <= -sl:
+                trade[f"sl{sl}_step"] = step
+
+    def _close_trade(self, trade, step, close, wma, reason):
+        """Close a trade, compute PNL, append to trades list."""
+        self._update_trade_minmax(trade, close, step)
+        trade["min_pnl"] = round(trade["min_pnl"], 4)
+        trade["max_pnl"] = round(trade["max_pnl"], 4)
+        trade["exit_step"] = step
+        trade["exit_close"] = close
+        trade["exit_wma55"] = wma
+        trade["exit_reason"] = reason
+        if trade["side"] == "call":
+            trade["pnl"] = round(close - trade["entry_close"], 4)
+        else:
+            trade["pnl"] = round(trade["entry_close"] - close, 4)
+        self.total_pnl += trade["pnl"]
+        trade["total_pnl"] = round(self.total_pnl, 4)
+        self.trades.append(trade)
+
     def compute_actions(self):
         """Detect signal at current step and compute order list.
 
@@ -579,8 +663,8 @@ class TradeMapLiteActionViewer:
         - First trade: immediate entry on first reading
         - Subsequent: PPCC -> call, CCPP -> put
 
+        Tracks full trade objects with all scan.py fields.
         Returns list of orders: [{'action': str, 'side': str, 'symbol': str}, ...]
-        On a flip: returns [Sell old, Buy new]. Otherwise single order.
         """
         if not self._load_aggregate():
             return [{'action': 'NA', 'side': None, 'symbol': 'NA'}]
@@ -596,6 +680,7 @@ class TradeMapLiteActionViewer:
         row_idx = step_mask.idxmax()
         close_val = float(self._cached_close_values[row_idx])
         wma_val = self._cached_wma[row_idx]
+        wma_clean = wma_val if not np.isnan(wma_val) else None
         self.current_close = close_val
 
         reading = self._detect_at_step(row_idx)
@@ -622,12 +707,17 @@ class TradeMapLiteActionViewer:
                 return build_option_symbol(strike, 'P', expiration_dt)
 
         orders = []
+        step = self.current_step
+
+        # Update open trade min/max on every step
+        if self.current_trade is not None:
+            self._update_trade_minmax(self.current_trade, close_val, step)
+            self.current_trade["hold_steps"] += 1
 
         if reading is None:
             action = 'HoldCurrent' if self.position is not None else 'NA'
             self.signals.append({
-                'step': self.current_step, 'close': close_val,
-                'wma55': wma_val if not np.isnan(wma_val) else None,
+                'step': step, 'close': close_val, 'wma55': wma_clean,
                 'signal': None, 'pattern': None,
                 'action': action, 'side': self.position_side, 'pnl': None,
                 'total_pnl': round(self.total_pnl, 4),
@@ -647,12 +737,13 @@ class TradeMapLiteActionViewer:
                 self.position = pattern
                 self.position_side = pattern
                 self.entry_close = close_val
+                self.entry_wma = wma_clean
                 symbol = _build_symbol(pattern)
                 self.position_symbol = symbol
+                self.current_trade = self._open_trade(pattern, step, close_val, wma_clean)
 
                 self.signals.append({
-                    'step': self.current_step, 'close': close_val,
-                    'wma55': wma_val if not np.isnan(wma_val) else None,
+                    'step': step, 'close': close_val, 'wma55': wma_clean,
                     'signal': reading, 'pattern': pattern,
                     'action': 'Buy', 'side': pattern, 'pnl': None,
                     'total_pnl': round(self.total_pnl, 4),
@@ -660,8 +751,7 @@ class TradeMapLiteActionViewer:
                 orders.append({'action': 'Buy', 'side': pattern, 'symbol': symbol})
             else:
                 self.signals.append({
-                    'step': self.current_step, 'close': close_val,
-                    'wma55': wma_val if not np.isnan(wma_val) else None,
+                    'step': step, 'close': close_val, 'wma55': wma_clean,
                     'signal': reading, 'pattern': None,
                     'action': 'NA', 'side': None, 'pnl': None,
                     'total_pnl': round(self.total_pnl, 4),
@@ -669,37 +759,35 @@ class TradeMapLiteActionViewer:
                 orders.append({'action': 'NA', 'side': None, 'symbol': 'NA'})
 
         elif pattern is not None and pattern != self.position:
-            # Signal flip -- two orders: Sell old, Buy new
-            if self.position_side == "call":
-                pnl = round(close_val - self.entry_close, 4)
-            else:
-                pnl = round(self.entry_close - close_val, 4)
-            self.total_pnl += pnl
-
+            # Signal flip -- close old trade, open new
             old_symbol = self.position_symbol
             old_side = self.position_side
 
+            # Close old trade
+            self._close_trade(self.current_trade, step, close_val, wma_clean, "signal_flip")
+
             # Order 1: Sell old
             self.signals.append({
-                'step': self.current_step, 'close': close_val,
-                'wma55': wma_val if not np.isnan(wma_val) else None,
+                'step': step, 'close': close_val, 'wma55': wma_clean,
                 'signal': reading, 'pattern': pattern,
-                'action': 'Sell', 'side': old_side, 'pnl': pnl,
+                'action': 'Sell', 'side': old_side, 'pnl': self.trades[-1]["pnl"],
                 'total_pnl': round(self.total_pnl, 4),
             })
             orders.append({'action': 'Sell', 'side': old_side, 'symbol': old_symbol})
 
-            # Order 2: Buy new
+            # Open new trade
             self.trade_num += 1
             self.position = pattern
             self.position_side = pattern
             self.entry_close = close_val
+            self.entry_wma = wma_clean
             new_symbol = _build_symbol(pattern)
             self.position_symbol = new_symbol
+            self.current_trade = self._open_trade(pattern, step, close_val, wma_clean)
 
+            # Order 2: Buy new
             self.signals.append({
-                'step': self.current_step, 'close': close_val,
-                'wma55': wma_val if not np.isnan(wma_val) else None,
+                'step': step, 'close': close_val, 'wma55': wma_clean,
                 'signal': reading, 'pattern': pattern,
                 'action': 'Buy', 'side': pattern, 'pnl': None,
                 'total_pnl': round(self.total_pnl, 4),
@@ -708,8 +796,7 @@ class TradeMapLiteActionViewer:
         else:
             # Hold current position
             self.signals.append({
-                'step': self.current_step, 'close': close_val,
-                'wma55': wma_val if not np.isnan(wma_val) else None,
+                'step': step, 'close': close_val, 'wma55': wma_clean,
                 'signal': reading, 'pattern': pattern,
                 'action': 'HoldCurrent', 'side': self.position_side, 'pnl': None,
                 'total_pnl': round(self.total_pnl, 4),
@@ -758,6 +845,77 @@ class TradeMapLiteActionViewer:
         self.sig_header_label.config(
             text=f"Signals - {len(self.signals)} steps | {buy_count} buys, {sell_count} sells | "
                  f"PNL: {self.total_pnl:+.4f} | Position: {pos_str}"
+        )
+
+        # Update trades table
+        self._update_trade_table()
+
+    def _update_trade_table(self):
+        """Refresh the trades treeview from self.trades + current open trade."""
+        for item in self.trade_tree.get_children():
+            self.trade_tree.delete(item)
+
+        def _fmt(v, decimals=4):
+            if v is None:
+                return ""
+            return f"{v:.{decimals}f}" if isinstance(v, float) else str(v)
+
+        def _fmt_pnl(v):
+            if v is None:
+                return ""
+            return f"{v:+.4f}"
+
+        # All closed trades + current open trade
+        all_trades = list(self.trades)
+        if self.current_trade is not None:
+            # Show open trade with live unrealized PNL
+            t = dict(self.current_trade)
+            t["exit_reason"] = "open"
+            if t["side"] == "call":
+                t["pnl"] = round(self.current_close - t["entry_close"], 4)
+            else:
+                t["pnl"] = round(t["entry_close"] - self.current_close, 4)
+            t["total_pnl"] = round(self.total_pnl + t["pnl"], 4)
+            all_trades.append(t)
+
+        for t in all_trades:
+            tag = 'open' if t.get("exit_reason") == "open" else ''
+            if t.get("pnl") is not None and t["pnl"] > 0:
+                tag = 'win' if t.get("exit_reason") != "open" else 'open'
+            elif t.get("pnl") is not None and t["pnl"] < 0:
+                tag = 'loss' if t.get("exit_reason") != "open" else 'open'
+
+            sl_vals = []
+            for sl in scan.SL_LEVELS:
+                sl_step = t.get(f"sl{sl}_step")
+                sl_vals.append(str(int(sl_step)) if sl_step is not None else "")
+
+            self.trade_tree.insert('', 'end', values=(
+                t["trade"], t["side"].upper(),
+                t["entry_step"], _fmt(t["entry_close"]), _fmt(t["entry_wma55"]),
+                t.get("exit_step") or "", _fmt(t.get("exit_close")), _fmt(t.get("exit_wma55")),
+                t.get("exit_reason") or "",
+                t["hold_steps"],
+                _fmt_pnl(t["min_pnl"]), _fmt_pnl(t["max_pnl"]),
+                _fmt_pnl(t.get("pnl")), _fmt_pnl(t.get("total_pnl")),
+                *sl_vals,
+            ), tags=(tag,))
+
+        self.trade_tree.tag_configure('win', foreground='#008800')
+        self.trade_tree.tag_configure('loss', foreground='#CC0000')
+        self.trade_tree.tag_configure('open', foreground='#0066CC')
+
+        # Auto-scroll
+        children = self.trade_tree.get_children()
+        if children:
+            self.trade_tree.see(children[-1])
+
+        # Header
+        closed = [t for t in self.trades if t.get("exit_reason") != "open"]
+        w = sum(1 for t in closed if t.get("pnl", 0) > 0)
+        l = sum(1 for t in closed if t.get("pnl", 0) < 0)
+        self.trade_header_label.config(
+            text=f"Trades - {len(all_trades)} total ({len(closed)} closed: W={w} L={l}) | PNL: {self.total_pnl:+.4f}"
         )
 
     def _fire_ib_order(self, order, step):

@@ -30,8 +30,21 @@ STEP_SIZE = 2
 MAX_STEPS = 11700
 VOLUMES = [720000, 1440000]
 
-# Winter (Standard Time, Nov-Mar): 14:30 UTC = 9:30 AM NYC
-MARKET_OPEN_HOUR = 14
+# Market open = 9:30 AM US/Eastern
+# Auto-detect DST: Summer (Mar-Nov) = 13:30 UTC, Winter (Nov-Mar) = 14:30 UTC
+import zoneinfo
+
+def _market_open_utc(date_str):
+    """Return (hour, minute) in UTC for 9:30 AM Eastern on the given date."""
+    from datetime import datetime as _dt
+    eastern = zoneinfo.ZoneInfo("America/New_York")
+    d = _dt.strptime(date_str, '%Y-%m-%d')
+    local_open = d.replace(hour=9, minute=30, second=0, tzinfo=eastern)
+    utc_open = local_open.astimezone(zoneinfo.ZoneInfo("UTC"))
+    return utc_open.hour, utc_open.minute
+
+# Defaults (overridden per-date in run())
+MARKET_OPEN_HOUR = 13
 MARKET_OPEN_MIN = 30
 MARKET_OPEN_SEC = 0
 
@@ -55,9 +68,9 @@ compute_volume_bars = _pipeline_module.compute_volume_bars
 
 
 def get_market_open_ts(date_str):
+    h, m = _market_open_utc(date_str)
     date = datetime.strptime(date_str, '%Y-%m-%d')
-    market_open = datetime(date.year, date.month, date.day,
-                          MARKET_OPEN_HOUR, MARKET_OPEN_MIN, MARKET_OPEN_SEC,
+    market_open = datetime(date.year, date.month, date.day, h, m, 0,
                           tzinfo=timezone.utc)
     return int(market_open.timestamp() * 1000)
 
