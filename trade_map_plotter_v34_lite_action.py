@@ -1140,7 +1140,7 @@ class TradeMapLiteActionViewer:
         for i in range(len(steps)):
             if np.isnan(wma[i]):
                 continue
-            if int(steps[i]) > self.max_available_step or int(steps[i]) >= EOD_STEP:
+            if int(steps[i]) > self.max_available_step:
                 break
             wma_slice = wma[:i + 1].copy()
             work.append((i, int(steps[i]), float(close_vals[i]), float(wma[i]), wma_slice, total_len))
