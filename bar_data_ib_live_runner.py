@@ -28,7 +28,7 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 # Configuration
 STEP_SIZE = 2
 MAX_STEPS = 11700
-VOLUMES = [360000]
+VOLUMES = [720000, 1440000]
 
 # Winter (Standard Time, Nov-Mar): 14:30 UTC = 9:30 AM NYC
 MARKET_OPEN_HOUR = 14
@@ -248,14 +248,14 @@ def main():
     parser.add_argument('--paper', action='store_true', help='Paper account (port 4002)')
     parser.add_argument('--bars5s', action='store_true', help='Use 5-sec bars instead of raw ticks')
     parser.add_argument('--max-step', type=int, help='Stop after this step')
-    parser.add_argument('--volumes', type=str, default='360000',
-                       help='Comma-separated volume thresholds (default: 360000)')
+    parser.add_argument('--volumes', type=str, default='720000,1440000',
+                       help='Comma-separated volume thresholds (default: 720000,1440000)')
     parser.add_argument('--step-size', type=int, default=2,
                        help='Seconds per step (default: 2)')
     parser.add_argument('--date', type=str, default=None,
                        help='Date to run for, YYYY-MM-DD (default: today)')
-    parser.add_argument('--symbol', type=str, default='AAPL',
-                       help='Ticker symbol (default: AAPL)')
+    parser.add_argument('--symbol', type=str, default='SOFI',
+                       help='Ticker symbol (default: SOFI)')
     parser.add_argument('--no-step-files', action='store_true',
                        help='Skip writing per-step aggregate CSVs (step_NNNNN.csv)')
     parser.add_argument('--core-only', action='store_true',
