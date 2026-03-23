@@ -416,15 +416,27 @@ class TradeMapLiteActionViewer:
             '#', 'Side', 'EntryStep', 'EntryClose', 'EntryWMA',
             'ExitStep', 'ExitClose', 'ExitWMA', 'ExitReason',
             'Hold', 'MinPNL', 'MaxPNL', 'PNL', 'TotalPNL',
-            'SL0.01', 'SL0.02', 'SL0.03', 'SL0.04', 'SL0.05',
+            'dEntStp', 'dEntCls', 'dExtStp', 'dExtCls', 'dPNL', 'dTotPNL',
+            'SL.01', 'SL.01nStp', 'SL.01nCls', 'SL.01nRdg', 'SL.01xPNL',
+            'SL.02', 'SL.02nStp', 'SL.02nCls', 'SL.02nRdg', 'SL.02xPNL',
+            'SL.03', 'SL.03nStp', 'SL.03nCls', 'SL.03nRdg', 'SL.03xPNL',
+            'SL.04', 'SL.04nStp', 'SL.04nCls', 'SL.04nRdg', 'SL.04xPNL',
+            'SL.05', 'SL.05nStp', 'SL.05nCls', 'SL.05nRdg', 'SL.05xPNL',
         )
         self.trade_tree = ttk.Treeview(trade_table_frame, columns=self.trade_cols, show='headings', height=8)
         trade_widths = {
             '#': 30, 'Side': 40, 'EntryStep': 65, 'EntryClose': 75, 'EntryWMA': 75,
             'ExitStep': 65, 'ExitClose': 75, 'ExitWMA': 75, 'ExitReason': 75,
             'Hold': 40, 'MinPNL': 60, 'MaxPNL': 60, 'PNL': 60, 'TotalPNL': 70,
-            'SL0.01': 55, 'SL0.02': 55, 'SL0.03': 55, 'SL0.04': 55, 'SL0.05': 55,
+            'dEntStp': 55, 'dEntCls': 65, 'dExtStp': 55, 'dExtCls': 65, 'dPNL': 60, 'dTotPNL': 65,
         }
+        for sl in scan.SL_LEVELS:
+            s = f"{sl:.2f}"[1:]  # ".01" etc
+            trade_widths[f'SL{s}'] = 50
+            trade_widths[f'SL{s}nStp'] = 55
+            trade_widths[f'SL{s}nCls'] = 60
+            trade_widths[f'SL{s}nRdg'] = 50
+            trade_widths[f'SL{s}xPNL'] = 55
         for col in self.trade_cols:
             self.trade_tree.heading(col, text=col)
             self.trade_tree.column(col, width=trade_widths.get(col, 55), anchor='center')
@@ -619,9 +631,17 @@ class TradeMapLiteActionViewer:
             "exit_reason": None, "hold_steps": 0,
             "min_pnl": 0.0, "max_pnl": 0.0,
             "pnl": None, "total_pnl": None,
+            # delayed execution columns
+            "d_entry_step": None, "d_entry_close": None,
+            "d_exit_step": None, "d_exit_close": None,
+            "d_pnl": None, "d_total_pnl": None,
         }
         for sl in scan.SL_LEVELS:
             t[f"sl{sl}_step"] = None
+            t[f"sl{sl}_next_step"] = None
+            t[f"sl{sl}_next_close"] = None
+            t[f"sl{sl}_next_reading"] = None
+            t[f"sl{sl}_exit_pnl"] = None
         return t
 
     def _update_trade_minmax(self, trade, close, step):
@@ -639,8 +659,66 @@ class TradeMapLiteActionViewer:
             if trade[f"sl{sl}_step"] is None and unrealized <= -sl:
                 trade[f"sl{sl}_step"] = step
 
+    def _lookup_step(self, step_num):
+        """Look up close and reading for a given step from aggregate + signals.
+        Returns (close, reading) or (None, None)."""
+        if self._cached_df is None:
+            return None, None
+        df = self._cached_df
+        if 'step' not in df.columns:
+            return None, None
+        mask = df['step'] == step_num
+        if not mask.any():
+            return None, None
+        idx = mask.idxmax()
+        close = float(self._cached_close_values[idx])
+        # Find reading from signals list
+        reading = None
+        for sig in self.signals:
+            if sig['step'] == step_num:
+                reading = sig.get('signal')
+                break
+        return close, reading
+
+    def _fill_delayed_fields(self, trade):
+        """Fill d_entry, d_exit, d_pnl from step+1 lookups."""
+        # Delayed entry: step+1 after entry
+        d_entry_step = trade["entry_step"] + 1
+        d_entry_close, _ = self._lookup_step(d_entry_step)
+        trade["d_entry_step"] = d_entry_step
+        trade["d_entry_close"] = d_entry_close
+
+        # Delayed exit: step+1 after exit
+        if trade["exit_step"] is not None:
+            d_exit_step = trade["exit_step"] + 1
+            d_exit_close, _ = self._lookup_step(d_exit_step)
+            trade["d_exit_step"] = d_exit_step
+            trade["d_exit_close"] = d_exit_close
+
+            if d_entry_close is not None and d_exit_close is not None:
+                if trade["side"] == "call":
+                    trade["d_pnl"] = round(d_exit_close - d_entry_close, 4)
+                else:
+                    trade["d_pnl"] = round(d_entry_close - d_exit_close, 4)
+
+    def _fill_sl_exit_fields(self, trade):
+        """Fill sl*_next_step, sl*_next_close, sl*_next_reading, sl*_exit_pnl."""
+        for sl in scan.SL_LEVELS:
+            sl_step = trade.get(f"sl{sl}_step")
+            if sl_step is not None:
+                next_step = int(sl_step) + 1
+                next_close, next_reading = self._lookup_step(next_step)
+                trade[f"sl{sl}_next_step"] = next_step
+                trade[f"sl{sl}_next_close"] = next_close
+                trade[f"sl{sl}_next_reading"] = next_reading
+                if next_close is not None:
+                    if trade["side"] == "call":
+                        trade[f"sl{sl}_exit_pnl"] = round(next_close - trade["entry_close"], 4)
+                    else:
+                        trade[f"sl{sl}_exit_pnl"] = round(trade["entry_close"] - next_close, 4)
+
     def _close_trade(self, trade, step, close, wma, reason):
-        """Close a trade, compute PNL, append to trades list."""
+        """Close a trade, compute PNL, fill delayed/SL fields, append to trades list."""
         self._update_trade_minmax(trade, close, step)
         trade["min_pnl"] = round(trade["min_pnl"], 4)
         trade["max_pnl"] = round(trade["max_pnl"], 4)
@@ -654,6 +732,9 @@ class TradeMapLiteActionViewer:
             trade["pnl"] = round(trade["entry_close"] - close, 4)
         self.total_pnl += trade["pnl"]
         trade["total_pnl"] = round(self.total_pnl, 4)
+        # Fill delayed and SL exit columns
+        self._fill_delayed_fields(trade)
+        self._fill_sl_exit_fields(trade)
         self.trades.append(trade)
 
     def compute_actions(self):
@@ -855,20 +936,27 @@ class TradeMapLiteActionViewer:
         for item in self.trade_tree.get_children():
             self.trade_tree.delete(item)
 
-        def _fmt(v, decimals=4):
+        def _f(v):
             if v is None:
                 return ""
-            return f"{v:.{decimals}f}" if isinstance(v, float) else str(v)
+            return f"{v:.4f}" if isinstance(v, float) else str(v)
 
-        def _fmt_pnl(v):
+        def _fp(v):
             if v is None:
                 return ""
             return f"{v:+.4f}"
 
+        def _fi(v):
+            if v is None:
+                return ""
+            return str(int(v))
+
+        # Recompute d_total_pnl across all trades
+        d_total = 0.0
+
         # All closed trades + current open trade
         all_trades = list(self.trades)
         if self.current_trade is not None:
-            # Show open trade with live unrealized PNL
             t = dict(self.current_trade)
             t["exit_reason"] = "open"
             if t["side"] == "call":
@@ -876,6 +964,8 @@ class TradeMapLiteActionViewer:
             else:
                 t["pnl"] = round(t["entry_close"] - self.current_close, 4)
             t["total_pnl"] = round(self.total_pnl + t["pnl"], 4)
+            # Try filling SL exit fields for open trade too
+            self._fill_sl_exit_fields(t)
             all_trades.append(t)
 
         for t in all_trades:
@@ -885,19 +975,32 @@ class TradeMapLiteActionViewer:
             elif t.get("pnl") is not None and t["pnl"] < 0:
                 tag = 'loss' if t.get("exit_reason") != "open" else 'open'
 
+            # Delayed columns — recompute d_total_pnl running sum
+            d_pnl = t.get("d_pnl")
+            if d_pnl is not None:
+                d_total += d_pnl
+            t["d_total_pnl"] = round(d_total, 4) if d_pnl is not None else None
+
+            # SL columns: trigger step + next step/close/reading/exit_pnl
             sl_vals = []
             for sl in scan.SL_LEVELS:
-                sl_step = t.get(f"sl{sl}_step")
-                sl_vals.append(str(int(sl_step)) if sl_step is not None else "")
+                sl_vals.append(_fi(t.get(f"sl{sl}_step")))
+                sl_vals.append(_fi(t.get(f"sl{sl}_next_step")))
+                sl_vals.append(_f(t.get(f"sl{sl}_next_close")))
+                sl_vals.append(t.get(f"sl{sl}_next_reading") or "")
+                sl_vals.append(_fp(t.get(f"sl{sl}_exit_pnl")))
 
             self.trade_tree.insert('', 'end', values=(
                 t["trade"], t["side"].upper(),
-                t["entry_step"], _fmt(t["entry_close"]), _fmt(t["entry_wma55"]),
-                t.get("exit_step") or "", _fmt(t.get("exit_close")), _fmt(t.get("exit_wma55")),
+                t["entry_step"], _f(t["entry_close"]), _f(t["entry_wma55"]),
+                t.get("exit_step") or "", _f(t.get("exit_close")), _f(t.get("exit_wma55")),
                 t.get("exit_reason") or "",
                 t["hold_steps"],
-                _fmt_pnl(t["min_pnl"]), _fmt_pnl(t["max_pnl"]),
-                _fmt_pnl(t.get("pnl")), _fmt_pnl(t.get("total_pnl")),
+                _fp(t["min_pnl"]), _fp(t["max_pnl"]),
+                _fp(t.get("pnl")), _fp(t.get("total_pnl")),
+                _fi(t.get("d_entry_step")), _f(t.get("d_entry_close")),
+                _fi(t.get("d_exit_step")), _f(t.get("d_exit_close")),
+                _fp(t.get("d_pnl")), _fp(t.get("d_total_pnl")),
                 *sl_vals,
             ), tags=(tag,))
 
@@ -905,12 +1008,10 @@ class TradeMapLiteActionViewer:
         self.trade_tree.tag_configure('loss', foreground='#CC0000')
         self.trade_tree.tag_configure('open', foreground='#0066CC')
 
-        # Auto-scroll
         children = self.trade_tree.get_children()
         if children:
             self.trade_tree.see(children[-1])
 
-        # Header
         closed = [t for t in self.trades if t.get("exit_reason") != "open"]
         w = sum(1 for t in closed if t.get("pnl", 0) > 0)
         l = sum(1 for t in closed if t.get("pnl", 0) < 0)
