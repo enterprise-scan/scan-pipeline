@@ -252,6 +252,9 @@ class TradeMapLiteActionViewer:
         self.prev_symbol = 'NA'
         self.live_running = False
         self.ib_active = False
+        self.trade_mode = 'stock'  # 'stock' or 'option'
+        self.stock_ticker = 'SOFI'
+        self.stock_qty = 100
 
         self.root = tk.Tk()
         self.root.title(f"Scan Detector - Step {self.current_step}")
@@ -344,6 +347,26 @@ class TradeMapLiteActionViewer:
                                          font=('Arial', 9), foreground='#888888')
         self.ib_status_label.pack(side=tk.LEFT, padx=5)
 
+        ttk.Separator(live_frame, orient='vertical').pack(side=tk.LEFT, fill='y', padx=10)
+
+        # Mode: Stock / Option
+        ttk.Label(live_frame, text="Mode:").pack(side=tk.LEFT)
+        self.mode_var = tk.StringVar(value='stock')
+        ttk.Radiobutton(live_frame, text="Stock", variable=self.mode_var, value='stock',
+                         command=self._on_mode_change).pack(side=tk.LEFT, padx=2)
+        ttk.Radiobutton(live_frame, text="Option", variable=self.mode_var, value='option',
+                         command=self._on_mode_change).pack(side=tk.LEFT, padx=2)
+
+        ttk.Label(live_frame, text="Ticker:").pack(side=tk.LEFT, padx=(6, 0))
+        self.ticker_var = tk.StringVar(value='SOFI')
+        self.ticker_entry = ttk.Entry(live_frame, textvariable=self.ticker_var, width=6)
+        self.ticker_entry.pack(side=tk.LEFT, padx=2)
+
+        ttk.Label(live_frame, text="Qty:").pack(side=tk.LEFT)
+        self.qty_var = tk.IntVar(value=100)
+        ttk.Spinbox(live_frame, from_=1, to=10000, increment=1,
+                    textvariable=self.qty_var, width=5).pack(side=tk.LEFT, padx=2)
+
         # Signal + Trade table
         table_frame = ttk.Frame(self.root)
         table_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=5, pady=5)
@@ -429,6 +452,10 @@ class TradeMapLiteActionViewer:
         if new_step != self.current_step:
             self.current_step = new_step
             self.load_and_show()
+
+    def _on_mode_change(self):
+        self.trade_mode = self.mode_var.get()
+        _logger.info(f"[MODE] Switched to {self.trade_mode}")
 
     def _reset_scan_state(self):
         """Reset all scan detector state for a new run."""
@@ -540,37 +567,34 @@ class TradeMapLiteActionViewer:
     # =========================================================================
 
     def compute_actions(self):
-        """Detect signal at current step and compute Buy/Sell/Hold/NA action.
+        """Detect signal at current step and compute order list.
 
         Uses scan.py's pattern matching:
         - First trade: immediate entry on first reading
         - Subsequent: PPCC -> call, CCPP -> put
 
-        Returns (action, side, symbol) where:
-        - action: 'Buy', 'Sell', 'HoldCurrent', 'NA'
-        - side: 'call', 'put', or None
-        - symbol: option symbol or 'NA'
+        Returns list of orders: [{'action': str, 'side': str, 'symbol': str}, ...]
+        On a flip: returns [Sell old, Buy new]. Otherwise single order.
         """
         if not self._load_aggregate():
-            return 'NA', None, 'NA'
+            return [{'action': 'NA', 'side': None, 'symbol': 'NA'}]
 
         df = self._cached_df
         if 'step' not in df.columns:
-            return 'NA', None, 'NA'
+            return [{'action': 'NA', 'side': None, 'symbol': 'NA'}]
 
         step_mask = df['step'] == self.current_step
         if not step_mask.any():
-            return 'NA', None, 'NA'
+            return [{'action': 'NA', 'side': None, 'symbol': 'NA'}]
 
         row_idx = step_mask.idxmax()
         close_val = float(self._cached_close_values[row_idx])
         wma_val = self._cached_wma[row_idx]
         self.current_close = close_val
 
-        # Detect signal
         reading = self._detect_at_step(row_idx)
 
-        # Get expiration for symbol building
+        # Get expiration for option symbol building
         current_date_str = self.date_var.get()
         clean_date = current_date_str.split(' ')[0] if ' (' in current_date_str else current_date_str
         exp_str = self.exp_var.get()
@@ -579,24 +603,30 @@ class TradeMapLiteActionViewer:
         else:
             expiration_dt = get_next_expiration(clean_date)
 
-        action = 'NA'
-        side = self.position_side
-        symbol = self.position_symbol or 'NA'
-        pnl = None
+        ticker = self.ticker_var.get().strip().upper()
+
+        def _build_symbol(side):
+            if self.mode_var.get() == 'stock':
+                return ticker
+            if side == "call":
+                strike = (close_val // 2.5) * 2.5
+                return build_option_symbol(strike, 'C', expiration_dt)
+            else:
+                strike = math.ceil(close_val / 2.5) * 2.5
+                return build_option_symbol(strike, 'P', expiration_dt)
+
+        orders = []
 
         if reading is None:
-            # No signal -- hold current position or stay flat
-            if self.position is not None:
-                action = 'HoldCurrent'
-            # Add to signals table
+            action = 'HoldCurrent' if self.position is not None else 'NA'
             self.signals.append({
                 'step': self.current_step, 'close': close_val,
                 'wma55': wma_val if not np.isnan(wma_val) else None,
                 'signal': None, 'pattern': None,
-                'action': action, 'side': side, 'pnl': None,
+                'action': action, 'side': self.position_side, 'pnl': None,
                 'total_pnl': round(self.total_pnl, 4),
             })
-            return action, side, symbol
+            return [{'action': action, 'side': self.position_side, 'symbol': self.position_symbol or 'NA'}]
 
         # We have a reading
         self.reading_history.append(reading)
@@ -611,43 +641,39 @@ class TradeMapLiteActionViewer:
                 self.position = pattern
                 self.position_side = pattern
                 self.entry_close = close_val
-
-                # Build option symbol
-                if pattern == "call":
-                    strike = (close_val // 2.5) * 2.5
-                    symbol = build_option_symbol(strike, 'C', expiration_dt)
-                else:
-                    strike = math.ceil(close_val / 2.5) * 2.5
-                    symbol = build_option_symbol(strike, 'P', expiration_dt)
+                symbol = _build_symbol(pattern)
                 self.position_symbol = symbol
-                action = 'Buy'
-                side = pattern
+
+                self.signals.append({
+                    'step': self.current_step, 'close': close_val,
+                    'wma55': wma_val if not np.isnan(wma_val) else None,
+                    'signal': reading, 'pattern': pattern,
+                    'action': 'Buy', 'side': pattern, 'pnl': None,
+                    'total_pnl': round(self.total_pnl, 4),
+                })
+                orders.append({'action': 'Buy', 'side': pattern, 'symbol': symbol})
+            else:
+                self.signals.append({
+                    'step': self.current_step, 'close': close_val,
+                    'wma55': wma_val if not np.isnan(wma_val) else None,
+                    'signal': reading, 'pattern': None,
+                    'action': 'NA', 'side': None, 'pnl': None,
+                    'total_pnl': round(self.total_pnl, 4),
+                })
+                orders.append({'action': 'NA', 'side': None, 'symbol': 'NA'})
+
         elif pattern is not None and pattern != self.position:
-            # Signal flip -- sell current, buy new
+            # Signal flip -- two orders: Sell old, Buy new
             if self.position_side == "call":
                 pnl = round(close_val - self.entry_close, 4)
             else:
                 pnl = round(self.entry_close - close_val, 4)
             self.total_pnl += pnl
 
-            # Close old position
             old_symbol = self.position_symbol
             old_side = self.position_side
 
-            # Open new position
-            self.trade_num += 1
-            self.position = pattern
-            self.position_side = pattern
-            self.entry_close = close_val
-            if pattern == "call":
-                strike = (close_val // 2.5) * 2.5
-                symbol = build_option_symbol(strike, 'C', expiration_dt)
-            else:
-                strike = math.ceil(close_val / 2.5) * 2.5
-                symbol = build_option_symbol(strike, 'P', expiration_dt)
-            self.position_symbol = symbol
-
-            # Log the sell of old position
+            # Order 1: Sell old
             self.signals.append({
                 'step': self.current_step, 'close': close_val,
                 'wma55': wma_val if not np.isnan(wma_val) else None,
@@ -655,23 +681,36 @@ class TradeMapLiteActionViewer:
                 'action': 'Sell', 'side': old_side, 'pnl': pnl,
                 'total_pnl': round(self.total_pnl, 4),
             })
-            # The Buy of new position
-            action = 'Buy'
-            side = pattern
-            pnl = None  # fresh trade
+            orders.append({'action': 'Sell', 'side': old_side, 'symbol': old_symbol})
+
+            # Order 2: Buy new
+            self.trade_num += 1
+            self.position = pattern
+            self.position_side = pattern
+            self.entry_close = close_val
+            new_symbol = _build_symbol(pattern)
+            self.position_symbol = new_symbol
+
+            self.signals.append({
+                'step': self.current_step, 'close': close_val,
+                'wma55': wma_val if not np.isnan(wma_val) else None,
+                'signal': reading, 'pattern': pattern,
+                'action': 'Buy', 'side': pattern, 'pnl': None,
+                'total_pnl': round(self.total_pnl, 4),
+            })
+            orders.append({'action': 'Buy', 'side': pattern, 'symbol': new_symbol})
         else:
             # Hold current position
-            action = 'HoldCurrent'
+            self.signals.append({
+                'step': self.current_step, 'close': close_val,
+                'wma55': wma_val if not np.isnan(wma_val) else None,
+                'signal': reading, 'pattern': pattern,
+                'action': 'HoldCurrent', 'side': self.position_side, 'pnl': None,
+                'total_pnl': round(self.total_pnl, 4),
+            })
+            orders.append({'action': 'HoldCurrent', 'side': self.position_side, 'symbol': self.position_symbol or 'NA'})
 
-        self.signals.append({
-            'step': self.current_step, 'close': close_val,
-            'wma55': wma_val if not np.isnan(wma_val) else None,
-            'signal': reading, 'pattern': pattern,
-            'action': action, 'side': side, 'pnl': pnl,
-            'total_pnl': round(self.total_pnl, 4),
-        })
-
-        return action, side, symbol
+        return orders
 
     def _update_signal_table(self):
         """Refresh the signal treeview from self.signals."""
@@ -715,13 +754,36 @@ class TradeMapLiteActionViewer:
                  f"PNL: {self.total_pnl:+.4f} | Position: {pos_str}"
         )
 
-    def log_action(self, step, action, side, symbol):
+    def _fire_ib_order(self, order, step):
+        """Fire a single IB order based on current mode (stock/option)."""
+        action = order['action']
+        side = order['side']
+        symbol = order['symbol']
+        if action not in ('Buy', 'Sell'):
+            return
+
+        mode = self.mode_var.get()
+        side_upper = (side or '').upper()
+        qty = self.qty_var.get()
+
+        if mode == 'stock':
+            ticker = self.ticker_var.get().strip().upper()
+            _logger.info(f"[IB-STK] {action} {side_upper} {qty}x {ticker} @ step {step}")
+            ib_broker.execute_stock(action, ticker, qty, step, side_upper)
+        else:
+            _logger.info(f"[IB-OPT] {action} {side_upper} {symbol} @ step {step}")
+            ib_broker.execute(action, symbol, step, side_upper)
+
+    def log_action(self, step, orders):
         close_str = f"{self.current_close:.2f}" if hasattr(self, 'current_close') else "0.00"
-        side_str = side.upper() if side else "NA"
-        line = f"step-{step:04d}_close-{close_str}_action-{action}_side-{side_str}_symbol-{symbol}"
-        _logger.info(f"[ACTION] {line}")
-        if action in ('Buy', 'Sell'):
-            _logger.info(f"[ACTION] Trade #{self.trade_num} | PNL: {self.total_pnl:+.4f}")
+        for order in orders:
+            action = order['action']
+            side_str = (order['side'] or 'NA').upper()
+            symbol = order['symbol']
+            line = f"step-{step:04d}_close-{close_str}_action-{action}_side-{side_str}_symbol-{symbol}"
+            _logger.info(f"[ACTION] {line}")
+            if action in ('Buy', 'Sell'):
+                _logger.info(f"[ACTION] Trade #{self.trade_num} | PNL: {self.total_pnl:+.4f}")
 
     # =========================================================================
     # Live mode
@@ -762,13 +824,14 @@ class TradeMapLiteActionViewer:
                 # Force aggregate reload on each step during catchup
                 self._cached_agg_mtime = 0
 
-                action, side, symbol = self.compute_actions()
-                self.log_action(step, action, side, symbol)
+                orders = self.compute_actions()
+                self.log_action(step, orders)
 
                 if step % 100 == 0:
                     _logger.info(f"[CATCHUP] Step {step}/{self.max_available_step}")
                     self.live_status.config(text=f"Catching up: {step}/{self.max_available_step}")
-                    self.action_label.config(text=f"{action} {(side or '').upper()} {symbol}")
+                    last = orders[-1]
+                    self.action_label.config(text=f"{last['action']} {(last['side'] or '').upper()} {last['symbol']}")
                     self._update_signal_table()
                     self.root.update()
 
@@ -811,23 +874,20 @@ class TradeMapLiteActionViewer:
                 # Force aggregate reload
                 self._cached_agg_mtime = 0
 
-                action, side, symbol = self.compute_actions()
-                _logger.info(f"[POLL] Step {next_step}: {action} {(side or '').upper()} {symbol}")
+                orders = self.compute_actions()
+                _logger.info(f"[POLL] Step {next_step}: {len(orders)} order(s)")
 
-                # Fire IB orders
+                # Fire IB orders (all of them -- on flip this is Sell + Buy)
                 if self.ib_active:
-                    if action == 'Buy':
-                        _logger.info(f"[POLL] IB BUY {side} {symbol}")
-                        ib_broker.execute('Buy', symbol, next_step, (side or '').upper())
-                    elif action == 'Sell':
-                        _logger.info(f"[POLL] IB SELL {side} {symbol}")
-                        ib_broker.execute('Sell', symbol, next_step, (side or '').upper())
+                    for order in orders:
+                        self._fire_ib_order(order, next_step)
 
-                self.log_action(next_step, action, side, symbol)
+                self.log_action(next_step, orders)
                 self._update_signal_table()
 
+                last = orders[-1]
                 self.live_status.config(text=f"Live: step {next_step}")
-                self.action_label.config(text=f"{action} {(side or '').upper()} {symbol}")
+                self.action_label.config(text=f"{last['action']} {(last['side'] or '').upper()} {last['symbol']}")
                 self.step_label.config(text=f"Step: {next_step} / {self.max_available_step}")
                 self.root.update()
             else:
@@ -897,6 +957,10 @@ def main():
     parser = argparse.ArgumentParser(description='Scan Detector - WMA Image Signal Detection')
     parser.add_argument('csv_file', nargs='?', help='Path to step CSV file or run directory')
     parser.add_argument('--today', action='store_true', help='Use latest step file')
+    parser.add_argument('--mode', choices=['stock', 'option'], default='stock',
+                       help='Trading mode: stock or option (default: stock)')
+    parser.add_argument('--ticker', type=str, default='SOFI', help='Stock ticker (default: SOFI)')
+    parser.add_argument('--qty', type=int, default=100, help='Shares per trade (default: 100)')
     args = parser.parse_args()
 
     if args.today or not args.csv_file:
@@ -910,6 +974,12 @@ def main():
             sys.exit(1)
 
     viewer = TradeMapLiteActionViewer(csv_path)
+    viewer.mode_var.set(args.mode)
+    viewer.ticker_var.set(args.ticker)
+    viewer.qty_var.set(args.qty)
+    viewer.trade_mode = args.mode
+    viewer.stock_ticker = args.ticker
+    viewer.stock_qty = args.qty
     viewer.run()
 
 
