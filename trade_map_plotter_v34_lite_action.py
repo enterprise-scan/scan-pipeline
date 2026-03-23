@@ -1106,10 +1106,12 @@ class TradeMapLiteActionViewer:
             self._cached_agg_mtime = 0
             orders = self.compute_actions()
             self.log_action(step, orders)
-            if step % 100 == 0:
-                _logger.info(f"[CATCHUP] Step {step}/{self.max_available_step}")
-                self.live_status.config(text=f"Catching up: {step}/{self.max_available_step}")
-                self.root.update()
+            _logger.info(f"[CATCHUP] Step {step}/{self.max_available_step}")
+            last = orders[-1]
+            self.live_status.config(text=f"Catching up: {step}/{self.max_available_step}")
+            self.action_label.config(text=f"{last['action']} {(last['side'] or '').upper()} {last['symbol']}")
+            self._update_signal_table()
+            self.root.update()
 
     def _batch_catchup(self):
         """Fast parallel catch-up: batch detect signals, then replay into trade state."""
@@ -1138,7 +1140,7 @@ class TradeMapLiteActionViewer:
         for i in range(len(steps)):
             if np.isnan(wma[i]):
                 continue
-            if int(steps[i]) > self.max_available_step:
+            if int(steps[i]) > self.max_available_step or int(steps[i]) >= EOD_STEP:
                 break
             wma_slice = wma[:i + 1].copy()
             work.append((i, int(steps[i]), float(close_vals[i]), float(wma[i]), wma_slice, total_len))
