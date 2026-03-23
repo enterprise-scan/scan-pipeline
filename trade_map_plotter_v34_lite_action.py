@@ -82,6 +82,8 @@ def get_available_dates():
                       glob.glob(os.path.join(run_data, 'IB_*')))
     dates = []
     for d in run_dirs:
+        if not os.path.isdir(d):
+            continue
         basename = os.path.basename(d)
         parts = basename.split('_')
         flip_prefix = ""
@@ -158,6 +160,10 @@ def find_latest_step_file():
     if not run_dirs:
         print("No run directories found")
         return None
+    run_dirs = [d for d in run_dirs if os.path.isdir(d)]
+    if not run_dirs:
+        print("No run directories found")
+        return None
     originals = [d for d in run_dirs if 'FLIP' not in os.path.basename(d)]
     latest_run = originals[-1] if originals else run_dirs[-1]
     step_files = _find_step_files(latest_run)
@@ -194,8 +200,8 @@ def _find_aggregate_file(run_dir):
 def _find_prev_aggregate(run_dir):
     """Find the previous day's aggregate CSV for WMA warmup."""
     run_data = os.path.join(SCRIPT_DIR, 'run-data')
-    all_dirs = sorted(glob.glob(os.path.join(run_data, 'GAI_*')) +
-                      glob.glob(os.path.join(run_data, 'IB_*')))
+    all_dirs = sorted(d for d in glob.glob(os.path.join(run_data, 'GAI_*')) +
+                      glob.glob(os.path.join(run_data, 'IB_*')) if os.path.isdir(d))
     try:
         idx = all_dirs.index(run_dir)
     except ValueError:
