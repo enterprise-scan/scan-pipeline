@@ -73,7 +73,7 @@ def build_option_symbol(strike, opt_type, expiration_dt):
     date_part = expiration_dt.strftime('%y%m%d')
     strike_int = int(strike * 1000)
     strike_part = f"{strike_int:08d}"
-    return f"AAPL{date_part}{opt_type}{strike_part}"
+    return f"SOFI{date_part}{opt_type}{strike_part}"
 
 
 def get_available_dates():
