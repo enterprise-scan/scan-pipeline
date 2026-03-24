@@ -106,7 +106,7 @@ def run(date_str, port, max_step=None, volumes=None, use_bars5s=False, skip_step
         shift_ms = previous_bars * STEP_SIZE * 1000
         market_open_ts -= shift_ms
     market_open_dt = datetime.fromtimestamp(market_open_ts / 1000, tz=timezone.utc)
-    step_limit = max_step if max_step else (MAX_STEPS + previous_bars)
+    step_limit = max_step if max_step else MAX_STEPS
 
     mode_str = "PAPER" if port == 4002 else "LIVE"
     print(f"Run ID: {run_id}")
