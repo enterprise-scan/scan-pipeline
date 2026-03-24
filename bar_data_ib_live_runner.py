@@ -84,7 +84,7 @@ def get_step_timestamp(market_open_ts, step):
     return market_open_ts + (step - 1) * STEP_SIZE * 1000
 
 
-def run(date_str, port, max_step=None, volumes=None, use_bars5s=False, skip_step_files=False, core_only=False, paper=False):
+def run(date_str, port, max_step=None, volumes=None, use_bars5s=False, skip_step_files=False, core_only=False, paper=False, previous_bars=0):
     if volumes is None:
         volumes = VOLUMES
 
@@ -101,8 +101,12 @@ def run(date_str, port, max_step=None, volumes=None, use_bars5s=False, skip_step
     os.makedirs(bar_dir, exist_ok=True)
 
     market_open_ts = get_market_open_ts(date_str, paper=paper)
+    if previous_bars > 0:
+        # Shift start back to include pre-market bars
+        shift_ms = previous_bars * STEP_SIZE * 1000
+        market_open_ts -= shift_ms
     market_open_dt = datetime.fromtimestamp(market_open_ts / 1000, tz=timezone.utc)
-    step_limit = max_step if max_step else MAX_STEPS
+    step_limit = max_step if max_step else (MAX_STEPS + previous_bars)
 
     mode_str = "PAPER" if port == 4002 else "LIVE"
     print(f"Run ID: {run_id}")
@@ -110,6 +114,8 @@ def run(date_str, port, max_step=None, volumes=None, use_bars5s=False, skip_step
     print(f"IB: {mode_str} (port {port})")
     print(f"Max steps: {step_limit}, step size: {STEP_SIZE}s")
     print(f"Market open: {market_open_dt}")
+    if previous_bars > 0:
+        print(f"Pre-market bars: {previous_bars} ({previous_bars * STEP_SIZE}s before open)")
     print("=" * 60)
 
     # Persistent IB connection
@@ -278,6 +284,8 @@ def main():
                        help='Skip writing per-step aggregate CSVs (step_NNNNN.csv)')
     parser.add_argument('--core-only', action='store_true',
                        help='Only output core columns: timestamp, last_raw_ts, OHLC, step')
+    parser.add_argument('--previousbars', type=int, default=0,
+                       help='Generate N bars from pre-market data before open (default: 0)')
 
     args = parser.parse_args()
 
@@ -296,7 +304,8 @@ def main():
     set_ticker(args.symbol)
 
     run(date_str, port, args.max_step, volumes, use_bars5s=args.bars5s,
-        skip_step_files=args.no_step_files, core_only=args.core_only, paper=args.paper)
+        skip_step_files=args.no_step_files, core_only=args.core_only, paper=args.paper,
+        previous_bars=args.previousbars)
 
 
 if __name__ == '__main__':
