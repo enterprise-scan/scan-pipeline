@@ -380,6 +380,10 @@ class TradeMapLiteActionViewer:
         ttk.Separator(live_frame, orient='vertical').pack(side=tk.LEFT, fill='y', padx=10)
         self.batch_catchup_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(live_frame, text="Batch Catchup", variable=self.batch_catchup_var).pack(side=tk.LEFT, padx=2)
+        self.save_images_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(live_frame, text="Save Images", variable=self.save_images_var).pack(side=tk.LEFT, padx=2)
+        self.save_actions_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(live_frame, text="Save Actions", variable=self.save_actions_var).pack(side=tk.LEFT, padx=2)
 
         # Trades table
         table_frame = ttk.Frame(self.root)
@@ -558,7 +562,19 @@ class TradeMapLiteActionViewer:
         img = scan.render_to_image(full_series, total_len)
         if img is None:
             return None
-        return scan.detect_signal(img)
+
+        signal = scan.detect_signal(img)
+
+        # Save image if enabled
+        if self.save_images_var.get():
+            img_dir = os.path.join(self.run_dir, 'images')
+            os.makedirs(img_dir, exist_ok=True)
+            sig_str = signal or "none"
+            img_path = os.path.join(img_dir, f"step_{self.current_step:05d}_{sig_str}.png")
+            import cv2
+            cv2.imwrite(img_path, img)
+
+        return signal
 
     def load_and_show(self):
         """Load aggregate, detect signal at current step, update table."""
@@ -1041,6 +1057,14 @@ class TradeMapLiteActionViewer:
         has_trade = any(o['action'] in ('Buy', 'Sell') for o in orders)
         if has_trade:
             _logger.info(f"[ACTION] Trade #{self.trade_num} | PNL: {self.total_pnl:+.4f}")
+
+        # Save .action file if enabled
+        if self.save_actions_var.get():
+            action_dir = os.path.join(self.run_dir, 'actions')
+            os.makedirs(action_dir, exist_ok=True)
+            action_path = os.path.join(action_dir, f"{line}.action")
+            with open(action_path, 'w') as f:
+                f.write(line + '\n')
 
     # =========================================================================
     # Live mode
